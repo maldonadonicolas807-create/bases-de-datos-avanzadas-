@@ -1,0 +1,182 @@
+--------------------------------------------------------------------------------
+-- LABORATORIO 1: ALMACENAMIENTO Y VALIDACIÓN DE FICHEROS XML EN ORACLE 21c XE
+-- CÓDIGO FUENTE UNIFICADO Y ORDENADO
+--------------------------------------------------------------------------------
+
+-- ============================================================================
+-- 1. LIMPIEZA Y CREACIÓN DE ESTRUCTURA RELACIONAL (ESQUEMA )
+-- ============================================================================
+BEGIN
+   FOR t IN (SELECT table_name FROM user_tables) LOOP
+      EXECUTE IMMEDIATE 'DROP TABLE "' || t.table_name || '" CASCADE CONSTRAINTS';
+   END LOOP;
+END;
+/
+PURGE RECYCLEBIN;
+
+CREATE TABLE jobs (
+    job_id VARCHAR2(10) CONSTRAINT pk_job PRIMARY KEY,
+    job_title VARCHAR2(35) CONSTRAINT nn_job_title NOT NULL,
+    min_salary NUMBER(6),
+    max_salary NUMBER(6)
+);
+
+CREATE TABLE departments (
+    department_id NUMBER(4) CONSTRAINT pk_dept PRIMARY KEY,
+    department_name VARCHAR2(30) CONSTRAINT nn_dept_name NOT NULL,
+    manager_id NUMBER(6),
+    location_id NUMBER(4)
+);
+
+CREATE TABLE employees (
+    employee_id NUMBER(6) CONSTRAINT pk_emp PRIMARY KEY,
+    first_name VARCHAR2(20),
+    last_name VARCHAR2(25) CONSTRAINT nn_emp_last_name NOT NULL,
+    email VARCHAR2(25) CONSTRAINT nn_emp_email NOT NULL,
+    phone_number VARCHAR2(20),
+    hire_date DATE CONSTRAINT nn_emp_hire_date NOT NULL,
+    job_id VARCHAR2(10) CONSTRAINT nn_emp_job NOT NULL,
+    salary NUMBER(8,2),
+    commission_pct NUMBER(2,2),
+    manager_id NUMBER(6),
+    department_id NUMBER(4),
+    CONSTRAINT fk_emp_job FOREIGN KEY (job_id) REFERENCES jobs(job_id),
+    CONSTRAINT fk_emp_dept FOREIGN KEY (department_id) REFERENCES departments(department_id)
+);
+
+
+-- ============================================================================
+-- 2. INSERCIÓN DE DATOS DE PRUEBA EN LAS TABLAS RELACIONALES
+-- ============================================================================
+INSERT INTO jobs VALUES ('IT_PROG', 'Programador IT', 4000, 10000);
+INSERT INTO jobs VALUES ('ST_CLERK', 'Clerk de Stock', 2000, 5000);
+INSERT INTO jobs VALUES ('SA_REP', 'Representante de Ventas', 6000, 12000);
+
+INSERT INTO departments VALUES (10, 'Administración', 100, 1700);
+INSERT INTO departments VALUES (20, 'Tecnología', 103, 1400);
+INSERT INTO departments VALUES (30, 'Ventas', 149, 1500);
+
+INSERT INTO employees VALUES (100, 'Juan', 'Pérez', 'JPEREZ', '515.123.4567', TO_DATE('2022-01-15','YYYY-MM-DD'), 'IT_PROG', 9000, NULL, NULL, 20);
+INSERT INTO employees VALUES (101, 'Ana', 'Gómez', 'AGOMEZ', '515.123.4568', TO_DATE('2022-03-20','YYYY-MM-DD'), 'ST_CLERK', 4500, NULL, 100, 10);
+INSERT INTO employees VALUES (102, 'Carlos', 'Ruiz', 'CRUIZ', '515.123.4569', TO_DATE('2023-06-10','YYYY-MM-DD'), 'SA_REP', 8000, 0.2, 100, 30);
+
+COMMIT;
+
+
+-- ============================================================================
+-- 3. REGISTRO DEL ESQUEMA XSD EN LA BASE DE DATOS
+-- ============================================================================
+BEGIN
+  DBMS_XMLSCHEMA.REGISTERSCHEMA(
+    schemaurl => 'http://localhost/schemas/reporte_empresa.xsd',
+    schemadoc => 
+'<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+   <xs:element name="ReporteEmpresa">
+      <xs:complexType>
+         <xs:sequence>
+            <xs:element name="Departamento" maxOccurs="unbounded">
+               <xs:complexType>
+                  <xs:sequence>
+                     <xs:element name="NombreDepartamento" type="xs:string"/>
+                     <xs:element name="Empleado" minOccurs="0" maxOccurs="unbounded">
+                        <xs:complexType>
+                           <xs:sequence>
+                              <xs:element name="NombreCompleto" type="xs:string"/>
+                              <xs:element name="Correo" type="xs:string"/>
+                              <xs:element name="Cargo" type="xs:string"/>
+                              <xs:element name="Salario" type="xs:decimal"/>
+                           </xs:sequence>
+                           <xs:attribute name="id" type="xs:integer" use="required"/>
+                        </xs:complexType>
+                     </xs:element>
+                  </xs:sequence>
+                  <xs:attribute name="id" type="xs:integer" use="required"/>
+               </xs:complexType>
+            </xs:element>
+         </xs:sequence>
+      </xs:complexType>
+   </xs:element>
+</xs:schema>',
+    local     => TRUE,
+    gentables => FALSE,
+    genviews  => FALSE
+);
+END;
+/
+
+
+-- ============================================================================
+-- 4. CREACIÓN DE LA TABLA XMLTYPE ENLAZADA AL ESQUEMA XSD
+-- ============================================================================
+CREATE TABLE reporte_xml_tabla OF XMLType
+XMLSCHEMA "http://localhost/schemas/reporte_empresa.xsd"
+ELEMENT "ReporteEmpresa";
+
+
+-- ============================================================================
+-- 5. CONSULTA SQL/XML GENERADORA DEL REPORTE JERÁRQUICO
+-- ============================================================================
+SET PAGESIZE 5000
+SET LONG 2000000
+SET LONGCHUNKSIZE 2000000
+
+SELECT XMLSERIALIZE(DOCUMENT 
+           XMLELEMENT("ReporteEmpresa",
+               XMLAGG(
+                   XMLELEMENT("Departamento",
+                       XMLATTRIBUTES(d.department_id AS "id"),
+                       XMLELEMENT("NombreDepartamento", d.department_name),
+                       (SELECT XMLAGG(
+                               XMLELEMENT("Empleado",
+                                   XMLATTRIBUTES(e.employee_id AS "id"),
+                                   XMLATTRIBUTES(e.employee_id AS "id"),
+                                   XMLELEMENT("NombreCompleto", e.first_name || ' ' || e.last_name),
+                                   XMLELEMENT("Correo", e.email),
+                                   XMLELEMENT("Cargo", j.job_title),
+                                   XMLELEMENT("Salario", e.salary)
+                               )
+                           )
+                        FROM employees e
+                        JOIN jobs j ON e.job_id = j.job_id
+                        WHERE e.department_id = d.department_id
+                       )
+                   )
+               )
+           ) AS CLOB INDENT SIZE = 2) AS xml_resultado
+FROM departments d;
+
+
+-- ============================================================================
+-- 6. PRUEBAS DE INSERCIÓN (VALIDACIÓN DE RESTRICCIONES XSD)
+-- ============================================================================
+
+-- A. Inserción Válida (Debe completarse con éxito: 1 row inserted)
+INSERT INTO reporte_xml_tabla VALUES (
+  XMLType('<ReporteEmpresa xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://localhost/schemas/reporte_empresa.xsd">
+             <Departamento id="10">
+                <NombreDepartamento>Administración</NombreDepartamento>
+                <Empleado id="200">
+                   <NombreCompleto>Carlos Pérez</NombreCompleto>
+                   <Correo>CPEREZ</Correo>
+                   <Cargo>IT_PROG</Cargo>
+                   <Salario>4500.00</Salario>
+                </Empleado>
+             </Departamento>
+          </ReporteEmpresa>')
+);
+COMMIT;
+
+-- B. Inserción Inválida (Debe generar el error ORA-31038 por tipo decimal incorrecto)
+INSERT INTO reporte_xml_tabla VALUES (
+  XMLType('<ReporteEmpresa xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://localhost/schemas/reporte_empresa.xsd">
+             <Departamento>
+                <NombreDepartamento>Ventas</NombreDepartamento>
+                <Empleado id="201">
+                   <NombreCompleto>Ana Gómez</NombreCompleto>
+                   <Correo>AGOMEZ</Correo>
+                   <Cargo>SA_REP</Cargo>
+                   <Salario>SalarioInvalidoTexto</Salario>
+                </Empleado>
+             </Departamento>
+          </ReporteEmpresa>')
+);
